@@ -1,5 +1,5 @@
 #!/bin/zsh
-declare -a StringArray=('16 14 12')
+declare -a StringArray=('24 22 20 18 16 14 12')
 
 for val in ${StringArray[@]}; do
     echo $val
