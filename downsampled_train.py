@@ -1,7 +1,8 @@
 #!/usr/bin/env/python3
 """Recipe for training a wav2vec-based ctc ASR system with librispeech.
+This recipes also allows for downsampling the input with three possible candidates.
 The system employs wav2vec as its encoder. Decoding is performed with
-ctc greedy decoder.
+ctc greedy decoder or with language modelling
 To run this recipe, do the following:
 > python train_with_wav2vec.py hparams/train_with_wav2vec.yaml
 The neural network is trained on CTC likelihood target and character units
@@ -16,6 +17,7 @@ Authors
  * Abdel Heba 2020
  * Peter Plantinga 2020
  * Samuele Cornell 2020
+ * Salah Zaiem 2023
 """
 
 import os
@@ -26,14 +28,15 @@ import speechbrain as sb
 from speechbrain.utils.distributed import run_on_main
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
+import torchaudio
+import torchaudio.functional as F
+import torchaudio.transforms as T
 import numpy as np
 from thop import profile, clever_format
-
 from pyctcdecode import build_ctcdecoder
 import copy
 logger = logging.getLogger(__name__)
 
-subsampling = False
 
 # Define training procedure
 class ASR(sb.Brain):
@@ -43,35 +46,41 @@ class ASR(sb.Brain):
         wavs, wav_lens = batch.sig
         tokens_bos, _ = batch.tokens_bos
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
-        self.modules.wav2vec2.model.encoder.training = True # To keep the layerdrop 
-        if self.thop : 
-
-            mod = self.modules.wav2vec2.model 
-            mod.encoder.training = True
-
-            mod.encoder.config.layerdrop = self.hparams.test_layerdrop
-            macs, params = profile(mod, inputs=(wavs, ), verbose = False)
-            self.macs.append(macs)
+        
+        #Downsampling the inputs
+        if self.hparams.downsampling_technique =="convolutional" : 
+            wavs = self.modules.subsampling(wavs)
+        if self.hparams.downsampling_technique =="signal_downsampling" : 
+            wavs = self.resampler(wavs)
 
         # Forward pass
+        if self.hparams.compute_macs : #Should be turned off during train
+            macs, params = profile(self.modules.wav2vec2.model, inputs=(feats, ), verbose =False)
+            #self.macs.append(macs)
         feats = self.modules.wav2vec2(wavs)
+        if self.hparams.compute_macs :
+            second_macs, params = profile(self.modules.enc, inputs=(feats, ), verbose =False)
+            self.macs.append(macs+second_macs)
+        
         x = self.modules.enc(feats)
         # Compute outputs
         p_tokens = None
         logits = self.modules.ctc_lin(x)
+        if self.hparams.upsampling : 
+            logits = logits.view(logits.shape[0],-1,self.hparams.output_neurons)
         p_ctc = self.hparams.log_softmax(logits)
+
         if stage != sb.Stage.TRAIN:
-            if not self.language_modelling : 
+            if not self.use_language_modelling : 
                 p_tokens = sb.decoders.ctc_greedy_decode(
-                p_ctc, wav_lens, blank_id=self.hparams.blank_index
-            )
+                    p_ctc, wav_lens, blank_id=self.hparams.blank_index
+                )
         return p_ctc, wav_lens, p_tokens
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
         p_ctc, wav_lens, predicted_tokens = predictions
-
         ids = batch.id
         tokens_eos, tokens_eos_lens = batch.tokens_eos
         tokens, tokens_lens = batch.tokens
@@ -86,6 +95,8 @@ class ASR(sb.Brain):
 
         loss_ctc = self.hparams.ctc_cost(p_ctc, tokens, wav_lens, tokens_lens)
         loss = loss_ctc
+
+        #Validation WER are computed without using the language model
         if stage ==sb.Stage.VALID:
             predicted_words = [
                 "".join(self.tokenizer.decode_ndim(utt_seq)).split(" ")
@@ -98,7 +109,7 @@ class ASR(sb.Brain):
 
         if stage == sb.Stage.TEST:
             # Decode token terms to words
-            if self.language_modelling : 
+            if self.hparams.use_language_modelling : 
                 predicted_words =[]
                 for logs in p_ctc: 
                     text = decoder.decode(logs.detach().cpu().numpy())
@@ -113,7 +124,6 @@ class ASR(sb.Brain):
             self.wer_metric.append(ids, predicted_words, target_words)
             self.cer_metric.append(ids, predicted_words, target_words)
 
-
         return loss
 
     def fit_batch(self, batch):
@@ -124,10 +134,8 @@ class ASR(sb.Brain):
         if self.check_gradients(loss):
             self.wav2vec_optimizer.step()
             self.model_optimizer.step()
-
         self.wav2vec_optimizer.zero_grad()
         self.model_optimizer.zero_grad()
-
         return loss.detach()
 
     def evaluate_batch(self, batch, stage):
@@ -354,14 +362,24 @@ if __name__ == "__main__":
         checkpointer=hparams["checkpointer"],
     )
 
-    # We dynamicaly add the tokenizer to our brain class.
-    # NB: This tokenizer corresponds to the one used for the LM!!
-    asr_brain.thop = False # Turn off thop computation
-    asr_brain.language_modelling= False #To avoid language modelling during val steps 
-    # Training
-
-
     asr_brain.tokenizer = label_encoder
+    if hparams["downsampling_technique"]=="signal_downsampling" : 
+        downsampling_rate = int(hparams["sample_rate"] / hparams["downsampling_factor"])
+        asr_brain.resampler = T.Resample(hparams["sample_rate"], downsampling_rate, dtype=torch.float).to(asr_brain.device)
+
+    #Loading the labels for the LM decoding and the CTC decoder 
+    if hparams["use_language_modelling"]:
+        ind2lab = label_encoder.ind2lab
+        labels =[ind2lab[x] for x in range(len(ind2lab))]
+        labels = [""] + labels[1:] #Replace the <blank> token with a blank character, needed for PyCTCdecode
+        decoder = build_ctcdecoder(
+            labels,
+            kenlm_model_path=hparams["ngram_lm_path"],  # either .arpa or .bin file
+            alpha=0.5,  # tuned on a val set
+            beta=1.0,  # tuned on a val set
+        )
+
+    #Training
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,
         train_data,
@@ -370,74 +388,8 @@ if __name__ == "__main__":
         valid_loader_kwargs=hparams["valid_dataloader_opts"],
     )
 
-    def read_labels_file(labels_file): 
-        with open(labels_file, "r") as lf: 
-            lines = lf.read().splitlines()
-            division = "==="
-            numbers = {}
-            for line in lines : 
-                if division in line : 
-                    break
-                string, number = line.split("=>")
-                number = int(number)
-                string = string[1:-2]
-                numbers[number] = string
-            return [numbers[x] for x in range(len(numbers))]
-    labels = read_labels_file(os.path.join(hparams["save_folder"], "label_encoder.txt"))
-    print(labels)
-    labels = [""] + labels[1:]
-    print(len(labels))
-    decoder = build_ctcdecoder(
-        labels,
-        kenlm_model_path="/gpfsstore/rech/nou/uzn19yk/4-gram.arpa",  # either .arpa or .bin file
-        alpha=0.5,  # tuned on a val set
-        beta=1.0,  # tuned on a val set
-    )
-    print(f"layer drop during test : {hparams['test_layerdrop']}")
-    asr_brain.thop = False # Turn on MAC estimation
+    #Evaluation
     asr_brain.macs = []
-
-    asr_brain.modules.wav2vec2.model.encoder.config.layerdrop = hparams["test_layerdrop"]
-    asr_brain.language_modelling= False
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.wer_file = os.path.join(
-            hparams["output_folder"], "wer_{}.txt".format(k)
-        )
-        asr_brain.evaluate(
-            test_datasets[k], test_loader_kwargs=hparams["test_dataloader_opts"]
-        )
-        macs = clever_format([np.mean(asr_brain.macs)], "%.3f")
-        print(f" mean number of macs : {macs}")
-
-
-
-
-
-    asr_brain.language_modelling= False
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.wer_file = os.path.join(
-            hparams["output_folder"], "wer_{}.txt".format(k)
-        )
-        asr_brain.evaluate(
-            test_datasets[k], test_loader_kwargs=hparams["test_dataloader_opts"]
-        )
-    asr_brain.language_modelling = True
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.wer_file = os.path.join(
-            hparams["output_folder"], "wer_{}.txt".format(k)
-        )
-        asr_brain.evaluate(
-            test_datasets[k], test_loader_kwargs=hparams["test_dataloader_opts"]
-        )
-
-        
-        
-
-    print("Now running on CPU")
-    asr_brain.thop = False
-    asr_brain.device = "cpu"
-    asr_brain.modules.to("cpu")
-    asr_brain.language_modelling= False
     # Testing
     for k in test_datasets.keys():  # keys are test_clean, test_other etc
         asr_brain.hparams.wer_file = os.path.join(
@@ -446,30 +398,9 @@ if __name__ == "__main__":
         asr_brain.evaluate(
             test_datasets[k], test_loader_kwargs=hparams["test_dataloader_opts"]
         )
-    asr_brain.language_modelling = True
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.wer_file = os.path.join(
-            hparams["output_folder"], "wer_{}.txt".format(k)
-        )
-        asr_brain.evaluate(
-            test_datasets[k], test_loader_kwargs=hparams["test_dataloader_opts"]
-        )
-
-
-    # Testing in different options 
-    asr_brain.thop = True # Turn on MAC estimation
-    asr_brain.macs = []
-
-    asr_brain.language_modelling= False
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.wer_file = os.path.join(
-            hparams["output_folder"], "wer_{}.txt".format(k)
-        )
-        asr_brain.evaluate(
-            test_datasets[k], test_loader_kwargs=hparams["test_dataloader_opts"]
-        )
-        macs = clever_format([np.mean(asr_brain.macs)], "%.3f")
-        print(f" mean number of macs : {macs}")
+        if hparams["compute_thop"] == False : 
+            macs = clever_format([np.mean(asr_brain.macs)], "%.3f")
+            print(f" mean number of macs : {macs}")
 
 
 

@@ -352,16 +352,18 @@ if __name__ == "__main__":
     # We dynamicaly add the tokenizer to our brain class.
     # NB: This tokenizer corresponds to the one used for the LM!!
     asr_brain.tokenizer = label_encoder
+
+
+    #Remove a few layers from the model
     def cut_model(model, num_layers_to_keep):
         newModuleList = torch.nn.ModuleList()
         oldModuleList= model.encoder.layers
         for i in range(num_layers_to_keep):
             newModuleList.append(oldModuleList[i])
         model.encoder.layers = newModuleList
-        
-
         return model
     new_model = cut_model(asr_brain.modules.wav2vec2.model, hparams["considered_layers"])
+
     asr_brain.thop = False # Turn off thop computation
     asr_brain.language_modelling= False #To avoid language modelling during val steps 
     asr_brain.modules.wav2vec2.model = new_model
@@ -373,29 +375,18 @@ if __name__ == "__main__":
         train_loader_kwargs=hparams["train_dataloader_opts"],
         valid_loader_kwargs=hparams["valid_dataloader_opts"],
     )
-    def read_labels_file(labels_file): 
-        with open(labels_file, "r") as lf: 
-            lines = lf.read().splitlines()
-            division = "==="
-            numbers = {}
-            for line in lines : 
-                if division in line : 
-                    break
-                string, number = line.split("=>")
-                number = int(number)
-                string = string[1:-2]
-                numbers[number] = string
-            return [numbers[x] for x in range(len(numbers))]
-    labels = read_labels_file(os.path.join(hparams["save_folder"], "label_encoder.txt"))
-    print(labels)
-    labels = [""] + labels[1:]
-    print(len(labels))
-    decoder = build_ctcdecoder(
-        labels,
-        kenlm_model_path="/gpfsstore/rech/nou/uzn19yk/4-gram.arpa",  # either .arpa or .bin file
-        alpha=0.5,  # tuned on a val set
-        beta=1.0,  # tuned on a val set
-    )
+
+    if hparams["use_language_modelling"] : 
+        ind2lab = label_encoder.ind2lab
+        labels =[ind2lab[x] for x in range(len(ind2lab))]
+        labels = [""] + labels[1:] #Replace the <blank> token with a blank character, needed for PyCTCdecode
+        decoder = build_ctcdecoder(
+            labels,
+            kenlm_model_path=hparams["ngram_lm_path"],  # either .arpa or .bin file
+            alpha=0.5,  # tuned on a val set
+            beta=1.0,  # tuned on a val set
+        )
+
 
     # Testing in different options 
     asr_brain.language_modelling= False
