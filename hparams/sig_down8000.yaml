@@ -7,14 +7,14 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1986
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
-output_folder: /gpfsstore/rech/nou/uzn19yk/results/efficient/librispeech/3upsampling_wavlm/<seed>
+output_folder: /gpfsstore/rech/nou/uzn19yk/results/efficient/librispeech/test/sigdown_8000_notupsampled/1986/
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 
 # URL for the biggest Fairseq english wav2vec2 model.
 wav2vec2_hub: /gpfsstore/rech/nou/uzn19yk/wavlm/
-considered_layers: 12 
+encoder_dim: 1024 #Should be 1024 for Large versions and 768 for Base models
 
 # Data files
 data_folder: /gpfsscratch/rech/nou/uzn19yk/Libri/LibriSpeech/ # e,g./path/to/LibriSpeech
@@ -30,10 +30,18 @@ train_csv: !ref <csv_folder>/train-clean-100.csv
 valid_csv: !ref <csv_folder>/dev-clean.csv
 test_csv:
    - !ref <csv_folder>/test-clean.csv
-   #- !ref <csv_folder>/test-other.csv
+   - !ref <csv_folder>/test-other.csv
+
+
+downsampling_factor: 2
+downsampling_technique: signal_downsampling
+upsampling: False
+use_language_modelling: True
+ngram_lm_path: /gpfsstore/rech/nou/uzn19yk/4-gram.arpa
+compute_macs: False
 
 # Training parameters
-number_of_epochs: 10
+number_of_epochs: 15
 lr: 0.9
 lr_wav2vec: 0.0001
 sorting: ascending
@@ -43,7 +51,6 @@ sample_rate: 16000
 
 # With data_parallel batch_size is split into N jobs
 # With DDP batch_size is multiplied by N jobs
-# Must be 3 per GPU to fit 32GB of VRAM
 batch_size: 6
 test_batch_size: 4
 
@@ -64,13 +71,9 @@ dnn_neurons: 1024
 freeze_wav2vec: False
 
 # Outputs
+ctc_neurons: 31  
 output_neurons: 31  # BPE size, index(blank/eos/bos) = 0
-double_neurons: 62
-# Decoding parameters
 
-#
-# Functions and classes
-#
 epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
    limit: !ref <number_of_epochs>
 
@@ -79,7 +82,7 @@ augmentation: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
    speeds: [95, 100, 105]
 
 enc: !new:speechbrain.lobes.models.VanillaNN.VanillaNN
-   input_shape: [null, null, 1024]
+   input_shape: [null, null, !ref <encoder_dim>]
    activation: !ref <activation>
    dnn_blocks: !ref <dnn_layers>
    dnn_neurons: !ref <dnn_neurons>
@@ -94,23 +97,17 @@ wav2vec2: !new:speechbrain.lobes.models.huggingface_wav2vec.HuggingFaceWav2Vec2
 
 ctc_lin: !new:speechbrain.nnet.linear.Linear
    input_size: 1024
-   n_neurons: !ref <output_neurons>
+   n_neurons: !ref <ctc_neurons>
 
 log_softmax: !new:speechbrain.nnet.activations.Softmax
    apply_log: True
 
 subsampling: !new:speechbrain.nnet.CNN.Conv1d
-   stride: 3
+   stride: !ref <downsampling_factor>
    padding: valid
    kernel_size: 161
    out_channels: 1
    input_shape: [Null, Null]
-
-upsample: !new:speechbrain.lobes.models.VanillaNN.VanillaNN
-   input_shape: [null, null, !ref <output_neurons>]
-   activation: !ref <activation>
-   dnn_blocks: !ref <dnn_layers>
-   dnn_neurons: !ref <double_neurons>
 
 
 
@@ -122,10 +119,9 @@ modules:
    enc: !ref <enc>
    ctc_lin: !ref <ctc_lin>
    subsampling: !ref <subsampling>
-   upsample: !ref <upsample>
     
 model: !new:torch.nn.ModuleList
-   - [!ref <enc>, !ref <ctc_lin>, !ref <subsampling>, !ref <upsample>]
+   - [!ref <enc>, !ref <ctc_lin>, !ref <subsampling>]
 
 
 model_opt_class: !name:torch.optim.Adadelta
