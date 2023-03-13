@@ -71,10 +71,9 @@ class ASR(sb.Brain):
         p_ctc = self.hparams.log_softmax(logits)
 
         if stage != sb.Stage.TRAIN:
-            if not self.use_language_modelling : 
-                p_tokens = sb.decoders.ctc_greedy_decode(
+            p_tokens = sb.decoders.ctc_greedy_decode(
                     p_ctc, wav_lens, blank_id=self.hparams.blank_index
-                )
+            )
         return p_ctc, wav_lens, p_tokens
 
     def compute_objectives(self, predictions, batch, stage):
