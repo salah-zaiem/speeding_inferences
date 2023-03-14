@@ -60,7 +60,28 @@ python early_exiting.py hparams/early_exiting/early_exits.yaml
 - Code: https://github.com/speechbrain/speechbrain/
 - HuggingFace: https://huggingface.co/speechbrain/
 
-# **Citing SpeechBrain**
+# **Citing**
+Bibtex for the paper describing these experiments : 
+```bibtex
+@misc{https://doi.org/10.48550/arxiv.2303.06740,
+  doi = {10.48550/ARXIV.2303.06740},
+  
+  url = {https://arxiv.org/abs/2303.06740},
+  
+  author = {Zaiem, Salah and Algayres, Robin and Parcollet, Titouan and Essid, Slim and Ravanelli, Mirco},
+  
+  keywords = {Audio and Speech Processing (eess.AS), Machine Learning (cs.LG), FOS: Electrical engineering, electronic engineering, information engineering, FOS: Electrical engineering, electronic engineering, information engineering, FOS: Computer and information sciences, FOS: Computer and information sciences},
+  
+  title = {Fine-tuning Strategies for Faster Inference using Speech Self-Supervised Models: A Comparative Study},
+  
+  publisher = {arXiv},
+  
+  year = {2023},
+  
+  copyright = {arXiv.org perpetual, non-exclusive license}
+}
+```
+
 Please, cite SpeechBrain if you use it for your research or business.
 
 ```bibtex
